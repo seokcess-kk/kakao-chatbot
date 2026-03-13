@@ -1,3 +1,5 @@
+console.log('[STARTUP] Express 앱 로드됨');
+
 const express = require('express');
 
 const kakaoRouter = require('./routes/kakao');
