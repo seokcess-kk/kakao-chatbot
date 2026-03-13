@@ -29,42 +29,31 @@ npm run dev
 ## Endpoints
 
 - `GET /health`
-- `POST /kakao/keyword-volume`
+- `POST /kakao/command` - 통합 명령어 처리
 
-## Request Rules
+## 지원 명령어
 
-- `action.params.keyword`가 있으면 우선 사용합니다.
-- 없으면 `userRequest.utterance`에서 명령어를 제거하고 키워드를 추출합니다.
-- 지원 명령어: `검색량`, `조회`, `키워드검색량`
-- 키워드는 trim 및 연속 공백 정리를 거칩니다.
-- 2자 미만 또는 50자 초과면 오류를 반환합니다.
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| 분석 | 통합 분석 (기본) | `분석 다이어트` |
+| 검색량 | 검색량 + 연관 키워드 | `검색량 캠핑` |
+| 트렌드 | 12개월 추이 | `트렌드 맛집` |
+| 경쟁 | 경쟁 강도 분석 | `경쟁 여행` |
+| 시즌 | 시즌별 패턴 | `시즌 크리스마스` |
+| 연관 | 연관 키워드 25개 | `연관 운동` |
+| 도움말 | 사용법 안내 | `도움말` |
+
+키워드만 입력하면 자동으로 통합 분석이 수행됩니다.
 
 ## Example Request
 
 ```json
 {
   "userRequest": {
-    "utterance": "검색량 다이어트한약"
+    "utterance": "분석 다이어트한약"
   },
   "action": {
     "params": {}
-  }
-}
-```
-
-## Example Response
-
-```json
-{
-  "version": "2.0",
-  "template": {
-    "outputs": [
-      {
-        "simpleText": {
-          "text": "[키워드 검색량 조회]\n검색어: 다이어트한약\nPC 검색량: 12,300\n모바일 검색량: 45,100\n총 검색량: 57,400"
-        }
-      }
-    ]
   }
 }
 ```
@@ -75,7 +64,7 @@ npm run dev
 $body = @'
 {
   "userRequest": {
-    "utterance": "검색량 다이어트한약"
+    "utterance": "분석 다이어트한약"
   },
   "action": {
     "params": {}
@@ -85,7 +74,7 @@ $body = @'
 
 Invoke-RestMethod `
   -Method Post `
-  -Uri http://localhost:3000/kakao/keyword-volume `
+  -Uri http://localhost:3000/kakao/command `
   -ContentType "application/json; charset=utf-8" `
   -Body $body
 ```
