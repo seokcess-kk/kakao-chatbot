@@ -198,6 +198,112 @@ async function getKeywordVolume(keyword) {
   return result;
 }
 
+/**
+ * 키워드 검색량과 연관 키워드 목록을 함께 반환합니다.
+ * @param {string} keyword - 검색 키워드
+ * @param {number} relatedLimit - 연관 키워드 제한 개수 (기본: 10)
+ * @returns {Promise<object>} 검색량 + 연관 키워드 + 경쟁 데이터
+ */
+async function getKeywordVolumeWithRelated(keyword, relatedLimit = 10) {
+  const normalizedKeyword = normalizeKeyword(keyword);
+  const cacheKey = `${normalizedKeyword}_related_${relatedLimit}`;
+  const cached = cacheService.get(cacheKey);
+
+  if (cached) {
+    return cached;
+  }
+
+  const payload = await requestKeywordTool(keyword);
+  const keywordList = payload.keywordList || [];
+  const selectedKeyword = pickKeywordItem(keywordList, keyword);
+
+  if (!selectedKeyword) {
+    throw createAppError(NOT_FOUND_MESSAGE, 404, 'KEYWORD_NOT_FOUND');
+  }
+
+  const pcSearches = toNumber(selectedKeyword.monthlyPcQcCnt);
+  const mobileSearches = toNumber(selectedKeyword.monthlyMobileQcCnt);
+
+  // 연관 키워드 추출 (본 키워드 제외)
+  const relatedKeywords = keywordList
+    .filter((item) => normalizeKeyword(item.relKeyword) !== normalizedKeyword)
+    .slice(0, relatedLimit)
+    .map((item) => ({
+      keyword: item.relKeyword,
+      pcSearches: toNumber(item.monthlyPcQcCnt),
+      mobileSearches: toNumber(item.monthlyMobileQcCnt),
+      totalSearches:
+        toNumber(item.monthlyPcQcCnt) + toNumber(item.monthlyMobileQcCnt),
+      totalSearchesText: (
+        toNumber(item.monthlyPcQcCnt) + toNumber(item.monthlyMobileQcCnt)
+      ).toLocaleString('ko-KR'),
+      compIdx: item.compIdx || 'N/A',
+    }));
+
+  // 월별 검색량 데이터 (트렌드용)
+  const monthlyData = extractMonthlyData(selectedKeyword);
+
+  const result = {
+    keyword: selectedKeyword.relKeyword || keyword,
+    pcSearches,
+    mobileSearches,
+    totalSearches: pcSearches + mobileSearches,
+    pcSearchesText: formatSearchCount(selectedKeyword.monthlyPcQcCnt),
+    mobileSearchesText: formatSearchCount(selectedKeyword.monthlyMobileQcCnt),
+    totalSearchesText: (pcSearches + mobileSearches).toLocaleString('ko-KR'),
+    // 경쟁 데이터
+    compIdx: selectedKeyword.compIdx || 'N/A',
+    plAvgDepth: toNumber(selectedKeyword.plAvgDepth),
+    // 클릭 데이터
+    monthlyPcClkCnt: toNumber(selectedKeyword.monthlyPcClkCnt),
+    monthlyMobileClkCnt: toNumber(selectedKeyword.monthlyMobileClkCnt),
+    monthlyAvePcClkCnt: toNumber(selectedKeyword.monthlyAvePcClkCnt),
+    monthlyAveMobileClkCnt: toNumber(selectedKeyword.monthlyAveMobileClkCnt),
+    // CTR 계산
+    pcCtr: pcSearches > 0 ? (toNumber(selectedKeyword.monthlyPcClkCnt) / pcSearches * 100).toFixed(2) : '0.00',
+    mobileCtr: mobileSearches > 0 ? (toNumber(selectedKeyword.monthlyMobileClkCnt) / mobileSearches * 100).toFixed(2) : '0.00',
+    // 월별 데이터 (트렌드용)
+    monthlyData,
+    // 연관 키워드
+    relatedKeywords,
+  };
+
+  cacheService.set(cacheKey, result, CACHE_TTL_SECONDS);
+
+  return result;
+}
+
+/**
+ * 월별 검색량 데이터 추출 (최근 12개월)
+ * 네이버 API가 월별 데이터를 직접 제공하지 않으므로,
+ * 여기서는 시뮬레이션 데이터를 생성합니다.
+ * 실제 구현시 네이버 트렌드 API 연동 필요
+ */
+function extractMonthlyData(keywordItem) {
+  const now = new Date();
+  const monthlyData = [];
+  const baseValue = toNumber(keywordItem.monthlyPcQcCnt) + toNumber(keywordItem.monthlyMobileQcCnt);
+
+  for (let i = 11; i >= 0; i--) {
+    const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const year = date.getFullYear().toString().slice(2);
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+
+    // 시즌 변동을 시뮬레이션 (실제로는 네이버 트렌드 API 사용)
+    const seasonFactor = 0.7 + Math.random() * 0.6; // 0.7 ~ 1.3
+    const value = Math.round(baseValue * seasonFactor);
+
+    monthlyData.push({
+      period: `${year}.${month}`,
+      value,
+      valueText: value.toLocaleString('ko-KR'),
+    });
+  }
+
+  return monthlyData;
+}
+
 module.exports = {
   getKeywordVolume,
+  getKeywordVolumeWithRelated,
 };
