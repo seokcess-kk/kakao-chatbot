@@ -19,11 +19,11 @@ async function handleKeywordVolume(req, res, next) {
     const keyword = parseKeywordFromKakaoRequest(req.body);
     const volume = await getKeywordVolume(keyword);
     const text = [
-      '[\ud0a4\uc6cc\ub4dc \uac80\uc0c9\ub7c9 \uc870\ud68c]',
-      `\uac80\uc0c9\uc5b4: ${volume.keyword}`,
-      `PC \uac80\uc0c9\ub7c9: ${volume.pcSearchesText}`,
-      `\ubaa8\ubc14\uc77c \uac80\uc0c9\ub7c9: ${volume.mobileSearchesText}`,
-      `\ucd1d \uac80\uc0c9\ub7c9: ${volume.totalSearchesText}`,
+      '[키워드 검색량 조회]',
+      `검색어: ${volume.keyword}`,
+      `PC 검색량: ${volume.pcSearchesText}`,
+      `모바일 검색량: ${volume.mobileSearchesText}`,
+      `총 검색량: ${volume.totalSearchesText}`,
     ].join('\n');
 
     res.json(buildSimpleTextResponse(text));
