@@ -4,10 +4,27 @@ const { generateSignature } = require('../utils/signature');
 const NAVER_SEARCH_AD_BASE_URL = 'https://api.searchad.naver.com';
 const KEYWORD_TOOL_URI = '/keywordstool';
 const CACHE_TTL_SECONDS = 600;
+const NAVER_FETCH_TIMEOUT_MS = 3500; // 네이버 API 호출 제한 (카카오 5초 제한 고려)
 const GENERIC_ERROR_MESSAGE =
-  '\uac80\uc0c9\ub7c9 \uc870\ud68c \uc911 \uc624\ub958\uac00 \ubc1c\uc0dd\ud588\uc2b5\ub2c8\ub2e4. \uc7a0\uc2dc \ud6c4 \ub2e4\uc2dc \uc2dc\ub3c4\ud574\uc8fc\uc138\uc694.';
+  '검색량 조회 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
 const NOT_FOUND_MESSAGE =
-  '\uac80\uc0c9\ub7c9 \ub370\uc774\ud130\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.';
+  '검색량 데이터를 찾지 못했습니다.';
+
+/**
+ * 네이버 검색광고 API 인증 정보를 환경변수에서 읽어 반환합니다.
+ * @returns {{ customerId: string, apiKey: string, secretKey: string } | null}
+ */
+function getNaverCredentials() {
+  const customerId =
+    process.env.NAVER_CUSTOMER_ID || process.env.NAVER_SEARCHAD_CUSTOMER_ID;
+  const apiKey =
+    process.env.NAVER_API_KEY || process.env.NAVER_SEARCHAD_API_KEY;
+  const secretKey =
+    process.env.NAVER_SECRET_KEY || process.env.NAVER_SEARCHAD_SECRET_KEY;
+
+  if (!customerId || !apiKey || !secretKey) return null;
+  return { customerId, apiKey, secretKey };
+}
 
 function createAppError(message, statusCode, code, cause) {
   const error = new Error(message);
@@ -17,7 +34,7 @@ function createAppError(message, statusCode, code, cause) {
   return error;
 }
 
-function normalizeKeyword(value) {
+function normalizeCacheKey(value) {
   return String(value || '')
     .trim()
     .replace(/\s+/g, ' ')
@@ -56,46 +73,27 @@ function pickKeywordItem(keywordList, keyword) {
     return null;
   }
 
-  const normalizedKeyword = normalizeKeyword(keyword);
+  const normalizedKeyword = normalizeCacheKey(keyword);
 
   return (
     keywordList.find((item) => {
-      return normalizeKeyword(item.relKeyword) === normalizedKeyword;
+      return normalizeCacheKey(item.relKeyword) === normalizedKeyword;
     }) || keywordList[0]
   );
 }
 
 async function requestKeywordTool(keyword) {
-  // 디버깅 로그 추가
-  console.log('[DEBUG] requestKeywordTool 호출:', {
-    keyword,
-    keywordType: typeof keyword,
-    keywordLength: keyword?.length,
-    isEmpty: !keyword?.trim()
-  });
-
-  // 빈 키워드 방어
   const trimmedKeyword = String(keyword || '').trim();
   if (!trimmedKeyword) {
-    throw createAppError(
-      '검색어를 입력해주세요.',
-      400,
-      'EMPTY_KEYWORD'
-    );
+    throw createAppError('검색어를 입력해주세요.', 400, 'EMPTY_KEYWORD');
   }
 
-  const customerId =
-    process.env.NAVER_CUSTOMER_ID ||
-    process.env.NAVER_SEARCHAD_CUSTOMER_ID;
-  const apiKey =
-    process.env.NAVER_API_KEY || process.env.NAVER_SEARCHAD_API_KEY;
-  const secretKey =
-    process.env.NAVER_SECRET_KEY || process.env.NAVER_SEARCHAD_SECRET_KEY;
-
-  if (!customerId || !apiKey || !secretKey) {
+  const credentials = getNaverCredentials();
+  if (!credentials) {
     throw createAppError(GENERIC_ERROR_MESSAGE, 500, 'CONFIG_MISSING');
   }
 
+  const { customerId, apiKey, secretKey } = credentials;
   const timestamp = String(Date.now());
   const method = 'GET';
   const params = new URLSearchParams({
@@ -109,10 +107,12 @@ async function requestKeywordTool(keyword) {
     secretKey,
   });
 
-  let response;
+  const fetchStart = Date.now();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NAVER_FETCH_TIMEOUT_MS);
 
   try {
-    response = await fetch(
+    const response = await fetch(
       `${NAVER_SEARCH_AD_BASE_URL}${KEYWORD_TOOL_URI}?${params.toString()}`,
       {
         method,
@@ -122,80 +122,43 @@ async function requestKeywordTool(keyword) {
           'X-CUSTOMER': customerId,
           'X-Signature': signature,
         },
+        signal: controller.signal,
       }
     );
+
+    if (!response.ok) {
+      let payload = null;
+      try { payload = await response.json(); } catch (_) { /* ignore */ }
+
+      const code = (response.status === 401 || response.status === 403) ? 'NAVER_AUTH_ERROR'
+        : (response.status === 429 || response.status >= 500) ? 'NAVER_TEMPORARY_ERROR'
+        : 'NAVER_API_ERROR';
+      throw createAppError(GENERIC_ERROR_MESSAGE, 502, code, payload);
+    }
+
+    const data = await response.json();
+    clearTimeout(timeoutId);
+    console.log(`[TIMING] 네이버 API: ${Date.now() - fetchStart}ms (keyword: ${trimmedKeyword})`);
+    return data;
   } catch (error) {
-    throw createAppError(
-      GENERIC_ERROR_MESSAGE,
-      502,
-      'NAVER_NETWORK_ERROR',
-      error
-    );
-  }
+    clearTimeout(timeoutId);
+    const elapsed = Date.now() - fetchStart;
 
-  if (!response.ok) {
-    let payload = null;
+    // 이미 createAppError로 만들어진 에러는 그대로 전파
+    if (error.statusCode) throw error;
 
-    try {
-      payload = await response.json();
-    } catch (_error) {
-      payload = null;
-    }
+    console.error(`[TIMING] 네이버 API 실패: ${elapsed}ms`, error.name);
 
-    if (response.status === 401 || response.status === 403) {
+    if (error.name === 'AbortError') {
       throw createAppError(
-        GENERIC_ERROR_MESSAGE,
-        502,
-        'NAVER_AUTH_ERROR',
-        payload
+        '네이버 API 응답 지연으로 조회에 실패했습니다. 잠시 후 다시 시도해주세요.',
+        504,
+        'NAVER_TIMEOUT'
       );
     }
 
-    if (response.status === 429 || response.status >= 500) {
-      throw createAppError(
-        GENERIC_ERROR_MESSAGE,
-        502,
-        'NAVER_TEMPORARY_ERROR',
-        payload
-      );
-    }
-
-    throw createAppError(GENERIC_ERROR_MESSAGE, 502, 'NAVER_API_ERROR', payload);
+    throw createAppError(GENERIC_ERROR_MESSAGE, 502, 'NAVER_NETWORK_ERROR', error);
   }
-
-  return response.json();
-}
-
-async function getKeywordVolume(keyword) {
-  const normalizedKeyword = normalizeKeyword(keyword);
-  const cached = cacheService.get(normalizedKeyword);
-
-  if (cached) {
-    return cached;
-  }
-
-  const payload = await requestKeywordTool(keyword);
-  const selectedKeyword = pickKeywordItem(payload.keywordList, keyword);
-
-  if (!selectedKeyword) {
-    throw createAppError(NOT_FOUND_MESSAGE, 404, 'KEYWORD_NOT_FOUND');
-  }
-
-  const pcSearches = toNumber(selectedKeyword.monthlyPcQcCnt);
-  const mobileSearches = toNumber(selectedKeyword.monthlyMobileQcCnt);
-  const result = {
-    keyword: selectedKeyword.relKeyword || keyword,
-    pcSearches,
-    mobileSearches,
-    totalSearches: pcSearches + mobileSearches,
-    pcSearchesText: formatSearchCount(selectedKeyword.monthlyPcQcCnt),
-    mobileSearchesText: formatSearchCount(selectedKeyword.monthlyMobileQcCnt),
-    totalSearchesText: (pcSearches + mobileSearches).toLocaleString('ko-KR'),
-  };
-
-  cacheService.set(normalizedKeyword, result, CACHE_TTL_SECONDS);
-
-  return result;
 }
 
 /**
@@ -205,7 +168,7 @@ async function getKeywordVolume(keyword) {
  * @returns {Promise<object>} 검색량 + 연관 키워드 + 경쟁 데이터
  */
 async function getKeywordVolumeWithRelated(keyword, relatedLimit = 10) {
-  const normalizedKeyword = normalizeKeyword(keyword);
+  const normalizedKeyword = normalizeCacheKey(keyword);
   const cacheKey = `${normalizedKeyword}_related_${relatedLimit}`;
   const cached = cacheService.get(cacheKey);
 
@@ -226,7 +189,7 @@ async function getKeywordVolumeWithRelated(keyword, relatedLimit = 10) {
 
   // 연관 키워드 추출 (본 키워드 제외)
   const relatedKeywords = keywordList
-    .filter((item) => normalizeKeyword(item.relKeyword) !== normalizedKeyword)
+    .filter((item) => normalizeCacheKey(item.relKeyword) !== normalizedKeyword)
     .slice(0, relatedLimit)
     .map((item) => ({
       keyword: item.relKeyword,
@@ -303,7 +266,61 @@ function extractMonthlyData(keywordItem) {
   return monthlyData;
 }
 
+/**
+ * 네이버 API 연결 상태를 확인합니다.
+ * @returns {Promise<{ reachable: boolean, latencyMs: number, status: number|null, error: string|null }>}
+ */
+async function checkNaverApiHealth() {
+  const result = { reachable: false, latencyMs: null, status: null, error: null };
+
+  const credentials = getNaverCredentials();
+  if (!credentials) {
+    result.error = 'ENV_MISSING';
+    return result;
+  }
+
+  const { customerId, apiKey, secretKey } = credentials;
+  const timestamp = String(Date.now());
+  const method = 'GET';
+  const signature = generateSignature({ timestamp, method, uri: KEYWORD_TOOL_URI, secretKey });
+  const params = new URLSearchParams({ hintKeywords: '테스트', showDetail: '1' });
+
+  const start = Date.now();
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(
+      `${NAVER_SEARCH_AD_BASE_URL}${KEYWORD_TOOL_URI}?${params.toString()}`,
+      {
+        method,
+        headers: {
+          'X-Timestamp': timestamp,
+          'X-API-KEY': apiKey,
+          'X-CUSTOMER': customerId,
+          'X-Signature': signature,
+        },
+        signal: controller.signal,
+      }
+    );
+
+    clearTimeout(timeoutId);
+    result.latencyMs = Date.now() - start;
+    result.status = response.status;
+    result.reachable = response.ok;
+
+    if (!response.ok) {
+      try { result.error = await response.json(); } catch (_) { result.error = `HTTP ${response.status}`; }
+    }
+  } catch (error) {
+    result.latencyMs = Date.now() - start;
+    result.error = error.name === 'AbortError' ? 'TIMEOUT (5s)' : error.message;
+  }
+
+  return result;
+}
+
 module.exports = {
-  getKeywordVolume,
   getKeywordVolumeWithRelated,
+  checkNaverApiHealth,
 };

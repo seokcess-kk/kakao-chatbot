@@ -5,25 +5,21 @@ function errorHandler(error, req, res, next) {
     return next(error);
   }
 
-  if (error.statusCode) {
-    if (error.statusCode >= 500) {
-      console.error(error);
-    }
+  // 에러 코드와 메시지를 구조화하여 로깅
+  console.error('[ERROR]', {
+    code: error.code || 'UNKNOWN',
+    status: error.statusCode || 500,
+    message: error.message,
+    ...(error.cause ? { cause: error.cause } : {}),
+  });
 
-    return res
-      .status(error.statusCode)
-      .json(buildSimpleTextResponse(error.message));
-  }
+  // 카카오 스킬서버는 항상 HTTP 200으로 응답해야 함
+  // 비-200 응답은 카카오가 폴백 블록을 표시하므로 에러 메시지가 사용자에게 전달되지 않음
+  const userMessage = error.statusCode
+    ? error.message
+    : '검색량 조회 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
 
-  console.error(error);
-
-  return res
-    .status(500)
-    .json(
-      buildSimpleTextResponse(
-        '\uac80\uc0c9\ub7c9 \uc870\ud68c \uc911 \uc624\ub958\uac00 \ubc1c\uc0dd\ud588\uc2b5\ub2c8\ub2e4. \uc7a0\uc2dc \ud6c4 \ub2e4\uc2dc \uc2dc\ub3c4\ud574\uc8fc\uc138\uc694.'
-      )
-    );
+  return res.status(200).json(buildSimpleTextResponse(userMessage));
 }
 
 module.exports = errorHandler;

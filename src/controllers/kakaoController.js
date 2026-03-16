@@ -7,38 +7,75 @@ const {
 } = require('../utils/kakaoResponse');
 const { getKeywordVolumeWithRelated } = require('../services/naverKeywordService');
 
+/** 카카오 스킬서버 응답 제한 시간 (5초) 대비 안전 마진 */
+const KAKAO_TIMEOUT_MS = 4500;
+
+/**
+ * Promise에 타임아웃을 적용합니다.
+ * 카카오 5초 제한 내에 에러 응답이라도 반환하기 위한 안전장치입니다.
+ */
+function withTimeout(promise, ms) {
+  let timeoutId;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timeoutId)),
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        const err = new Error('요청 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+        err.statusCode = 504;
+        err.code = 'HANDLER_TIMEOUT';
+        reject(err);
+      }, ms);
+    }),
+  ]);
+}
+
 /**
  * 통합 커맨드 핸들러 - 커맨드 타입별로 분기
  */
 async function handleCommand(req, res, next) {
-  console.log('[DEBUG] handleCommand 호출:', {
+  const requestStart = Date.now();
+  const requestId = `req_${requestStart}_${Math.random().toString(36).slice(2, 6)}`;
+
+  console.log(`[${requestId}] 요청 시작`, {
     utterance: req.body?.userRequest?.utterance,
-    params: req.body?.action?.params
+    params: req.body?.action?.params,
   });
 
   try {
     const { keyword, commandType } = parseKeywordAndCommand(req.body);
 
-    console.log('[DEBUG] 파싱 결과:', { keyword, commandType });
+    console.log(`[${requestId}] 파싱 완료: ${commandType} "${keyword}" (+${Date.now() - requestStart}ms)`);
 
+    let handler;
     switch (commandType) {
       case COMMAND_TYPES.HELP:
-        return handleHelp(req, res);
+        handler = handleHelp(res);
+        break;
       case COMMAND_TYPES.SEARCH_VOLUME:
-        return handleSearchVolume(keyword, res);
+        handler = handleSearchVolume(keyword, res);
+        break;
       case COMMAND_TYPES.TREND:
-        return handleTrend(keyword, res);
+        handler = handleTrend(keyword, res);
+        break;
       case COMMAND_TYPES.COMPETITION:
-        return handleCompetition(keyword, res);
+        handler = handleCompetition(keyword, res);
+        break;
       case COMMAND_TYPES.SEASON:
-        return handleSeason(keyword, res);
+        handler = handleSeason(keyword, res);
+        break;
       case COMMAND_TYPES.RELATED:
-        return handleRelated(keyword, res);
+        handler = handleRelated(keyword, res);
+        break;
       case COMMAND_TYPES.ANALYZE:
       default:
-        return handleAnalyze(keyword, res);
+        handler = handleAnalyze(keyword, res);
+        break;
     }
+
+    await withTimeout(Promise.resolve(handler), KAKAO_TIMEOUT_MS);
+    console.log(`[${requestId}] 응답 완료 (+${Date.now() - requestStart}ms)`);
   } catch (error) {
+    console.error(`[${requestId}] 오류 (+${Date.now() - requestStart}ms)`, error.code || error.message);
     next(error);
   }
 }
@@ -110,7 +147,7 @@ async function handleAnalyze(keyword, res) {
     '📊 검색량',
     `총 ${data.totalSearchesText}회/월 (PC ${data.pcSearchesText} | 모바일 ${data.mobileSearchesText})`,
     '',
-    '📈 최근 6개월 트렌드',
+    '📈 최근 6개월 트렌드 (추정치)',
     ...trendLines,
     '',
     `🎯 경쟁 강도: ${getCompetitionEmoji(data.compIdx)} ${data.compIdx}`,
@@ -169,10 +206,12 @@ async function handleTrend(keyword, res) {
   const text = [
     `[키워드 트렌드: ${data.keyword}]`,
     '',
-    '최근 12개월 검색 추이:',
+    '최근 12개월 검색 추이 (추정치):',
     ...trendLines,
     '',
     `📈 전월 대비: ${changeSign}${changeRate}%`,
+    '',
+    '※ 월별 수치는 월간 총 검색량 기반 추정치입니다.',
   ].join('\n');
 
   res.json(buildSimpleTextResponse(text));
@@ -207,7 +246,6 @@ async function handleSeason(keyword, res) {
   const data = await getKeywordVolumeWithRelated(keyword, 0);
   const monthlyData = data.monthlyData;
   const maxValue = Math.max(...monthlyData.map((m) => m.value));
-  const minValue = Math.min(...monthlyData.map((m) => m.value));
   const avgValue = monthlyData.reduce((sum, m) => sum + m.value, 0) / monthlyData.length;
 
   // 피크/비수기 판별 기준: 평균 대비 20% 이상/이하
@@ -233,11 +271,13 @@ async function handleSeason(keyword, res) {
   const text = [
     `[시즌 분석] ${data.keyword}`,
     '',
-    '📅 월별 검색 추이',
+    '📅 월별 검색 추이 (추정치)',
     ...trendLines,
     '',
     `🔥 피크: ${peakMonths.length > 0 ? peakMonths.join(', ') + '월' : '해당 없음'}`,
     `💤 비수기: ${lowMonths.length > 0 ? lowMonths.join(', ') + '월' : '해당 없음'}`,
+    '',
+    '※ 월별 수치는 월간 총 검색량 기반 추정치입니다.',
   ].join('\n');
 
   res.json(buildSimpleTextResponse(text));
@@ -266,7 +306,7 @@ async function handleRelated(keyword, res) {
 /**
  * HELP 커맨드 - 도움말
  */
-function handleHelp(req, res) {
+function handleHelp(res) {
   const text = [
     '[키워드 분석 도우미] 사용법',
     '',

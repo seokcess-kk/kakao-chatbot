@@ -1,9 +1,3 @@
-const SUPPORTED_COMMANDS = [
-  '검색량',
-  '조회',
-  '키워드검색량',
-];
-
 // 커맨드 타입 정의
 const COMMAND_TYPES = {
   ANALYZE: 'ANALYZE',
@@ -47,27 +41,6 @@ function normalizeKeyword(keyword) {
     .replace(/\s+/g, ' ');
 }
 
-function stripCommandFromUtterance(utterance) {
-  const trimmed = normalizeKeyword(utterance);
-
-  if (!trimmed) {
-    return '';
-  }
-
-  const matchedCommand = SUPPORTED_COMMANDS.find((command) => {
-    return trimmed === command || trimmed.startsWith(`${command} `);
-  });
-
-  if (!matchedCommand) {
-    throw createValidationError(
-      '\uc870\ud68c\ud560 \uac80\uc0c9\uc5b4\ub97c \uc785\ub825\ud574\uc8fc\uc138\uc694. \uc608: \uac80\uc0c9\ub7c9 \ub2e4\uc774\uc5b4\ud2b8\ud55c\uc57d',
-      'INVALID_COMMAND'
-    );
-  }
-
-  return normalizeKeyword(trimmed.slice(matchedCommand.length));
-}
-
 function validateKeyword(keyword) {
   if (!keyword) {
     throw createValidationError(
@@ -84,16 +57,6 @@ function validateKeyword(keyword) {
   }
 
   return keyword;
-}
-
-function parseKeywordFromKakaoRequest(body) {
-  const paramKeyword = body?.action?.params?.keyword;
-  const sourceKeyword =
-    typeof paramKeyword === 'string' && paramKeyword.trim()
-      ? normalizeKeyword(paramKeyword)
-      : stripCommandFromUtterance(body?.userRequest?.utterance || '');
-
-  return validateKeyword(sourceKeyword);
 }
 
 /**
@@ -156,8 +119,6 @@ function parseKeywordAndCommand(body) {
 }
 
 module.exports = {
-  parseKeywordFromKakaoRequest,
-  parseCommandType,
   parseKeywordAndCommand,
   COMMAND_TYPES,
 };
