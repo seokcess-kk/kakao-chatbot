@@ -6,6 +6,8 @@ const {
   buildSimpleTextResponse,
 } = require('../utils/kakaoResponse');
 const { getKeywordVolumeWithRelated } = require('../services/naverKeywordService');
+const { getBlogDocCountBatch } = require('../services/naverSearchService');
+const statsService = require('../services/statsService');
 
 /** 카카오 스킬서버 응답 제한 시간 (5초) 대비 안전 마진 */
 const KAKAO_TIMEOUT_MS = 4500;
@@ -46,6 +48,9 @@ async function handleCommand(req, res, next) {
 
     console.log(`[${requestId}] 파싱 완료: ${commandType} "${keyword}" (+${Date.now() - requestStart}ms)`);
 
+    const userId = req.body?.userRequest?.user?.id || null;
+    statsService.trackCommand(commandType, userId);
+
     let handler;
     switch (commandType) {
       case COMMAND_TYPES.HELP:
@@ -65,6 +70,12 @@ async function handleCommand(req, res, next) {
         break;
       case COMMAND_TYPES.RELATED:
         handler = handleRelated(keyword, res);
+        break;
+      case COMMAND_TYPES.GOLDEN:
+        handler = handleGolden(keyword, res);
+        break;
+      case COMMAND_TYPES.USAGE:
+        handler = handleUsage(res);
         break;
       case COMMAND_TYPES.ANALYZE:
       default:
@@ -141,6 +152,7 @@ async function handleAnalyze(keyword, res) {
     .slice(0, 10)
     .map((r, i) => `${i + 1}. ${r.keyword} (${r.totalSearchesText})`);
 
+  const advice = getCompetitionAdvice(data.compIdx);
   const text = [
     `[${data.keyword}] 키워드 분석`,
     '',
@@ -151,11 +163,11 @@ async function handleAnalyze(keyword, res) {
     ...trendLines,
     '',
     `🎯 경쟁 강도: ${getCompetitionEmoji(data.compIdx)} ${data.compIdx}`,
-    getCompetitionAdvice(data.compIdx),
+    ...(advice ? [advice] : []),
     '',
     '🔗 연관 키워드 TOP 10',
     ...relatedLines,
-  ].filter(Boolean).join('\n');
+  ].join('\n');
 
   res.json(buildSimpleTextResponse(text));
 }
@@ -222,6 +234,7 @@ async function handleTrend(keyword, res) {
  */
 async function handleCompetition(keyword, res) {
   const data = await getKeywordVolumeWithRelated(keyword, 0);
+  const advice = getCompetitionAdvice(data.compIdx);
 
   const text = [
     `[경쟁 강도 분석: ${data.keyword}]`,
@@ -233,8 +246,8 @@ async function handleCompetition(keyword, res) {
     `PC: 월 ${data.monthlyPcClkCnt.toLocaleString()}회 (CTR ${data.pcCtr}%)`,
     `모바일: 월 ${data.monthlyMobileClkCnt.toLocaleString()}회 (CTR ${data.mobileCtr}%)`,
     '',
-    getCompetitionAdvice(data.compIdx),
-  ].filter(Boolean).join('\n');
+    ...(advice ? [advice] : []),
+  ].join('\n');
 
   res.json(buildSimpleTextResponse(text));
 }
@@ -304,6 +317,129 @@ async function handleRelated(keyword, res) {
 }
 
 /**
+ * 황금키워드 스코어 계산
+ * @param {number} monthlySearch - 월간 검색량
+ * @param {number|null} totalDocs - 총 문서 수 (null이면 API 실패)
+ */
+function goldenScore(monthlySearch, totalDocs) {
+  if (totalDocs === null || monthlySearch < 50) return null;
+  const docs = totalDocs === 0 ? 1 : totalDocs; // 문서 0 → 최고 블루오션
+  let ratio = monthlySearch / docs;
+  if (monthlySearch > 50000) ratio *= 0.3;
+  else if (monthlySearch > 10000) ratio *= 0.5;
+  else if (monthlySearch > 5000) ratio *= 0.7;
+  return Math.round(ratio * 100) / 100;
+}
+
+/**
+ * 스코어 등급 이모지
+ */
+function getScoreEmoji(score) {
+  if (score >= 1.0) return '🥇';
+  if (score >= 0.5) return '🥈';
+  if (score >= 0.1) return '🥉';
+  return '⬜';
+}
+
+/**
+ * GOLDEN 커맨드 - 황금키워드 발굴
+ */
+async function handleGolden(keyword, res) {
+  const data = await getKeywordVolumeWithRelated(keyword, 25);
+
+  // 사전 필터: 검색량 50 미만 제외 (5,000 초과는 스코어에서 감점 처리)
+  const candidates = data.relatedKeywords.filter(
+    (r) => r.totalSearches >= 50
+  );
+
+  if (candidates.length === 0) {
+    const text = [
+      `[황금키워드] ${data.keyword}`,
+      '',
+      '조건에 맞는 후보 키워드가 없습니다.',
+      '(월 검색량 50 이상의 연관 키워드가 필요합니다)',
+    ].join('\n');
+    return res.json(buildSimpleTextResponse(text));
+  }
+
+  // 문서 수 병렬 조회
+  const keywords = candidates.map((c) => c.keyword);
+  const docCounts = await getBlogDocCountBatch(keywords);
+
+  // 스코어 계산 및 정렬 (API 실패한 키워드는 제외)
+  const scored = candidates
+    .map((c) => {
+      const docs = docCounts.get(c.keyword) ?? null;
+      const score = goldenScore(c.totalSearches, docs);
+      return { ...c, docs, score };
+    })
+    .filter((c) => c.score !== null && c.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  if (scored.length === 0) {
+    const text = [
+      `[황금키워드] ${data.keyword}`,
+      '',
+      '스코어를 계산할 수 있는 키워드가 없습니다.',
+      '(문서 수 데이터를 확인할 수 없거나 검색량이 부족합니다)',
+    ].join('\n');
+    return res.json(buildSimpleTextResponse(text));
+  }
+
+  const resultLines = scored.map((c, i) => {
+    return `${i + 1}. ${getScoreEmoji(c.score)} ${c.keyword}\n   검색 ${c.totalSearchesText} | 문서 ${c.docs.toLocaleString('ko-KR')} | 스코어 ${c.score}`;
+  });
+
+  const text = [
+    `[황금키워드] ${data.keyword}`,
+    '',
+    '💰 스코어 = 검색량 ÷ 문서수 (높을수록 블루오션)',
+    '',
+    ...resultLines,
+    '',
+    `분석 대상: ${candidates.length}개 키워드 (검색량 50 이상)`,
+  ].join('\n');
+
+  res.json(buildSimpleTextResponse(text));
+}
+
+/**
+ * USAGE 커맨드 - API 사용량 및 통계 (도움말에 미표시)
+ */
+function handleUsage(res) {
+  const stats = statsService.getStats();
+
+  const dailyCmdLines = Object.entries(stats.daily.commandBreakdown)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cmd, count]) => `  ${cmd}: ${count}회`);
+
+  const monthlyCmdLines = Object.entries(stats.monthly.commandBreakdown)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cmd, count]) => `  ${cmd}: ${count}회`);
+
+  const text = [
+    `[사용량 리포트] ${stats.date}`,
+    '',
+    '📡 API 사용량 (일일)',
+    `검색광고 ${createBarGraph(stats.api.searchAd.used, stats.api.searchAd.limit)} ${stats.api.searchAd.used.toLocaleString('ko-KR')} / ${stats.api.searchAd.limit.toLocaleString('ko-KR')} (${stats.api.searchAd.percent}%)`,
+    `검색     ${createBarGraph(stats.api.search.used, stats.api.search.limit)} ${stats.api.search.used.toLocaleString('ko-KR')} / ${stats.api.search.limit.toLocaleString('ko-KR')} (${stats.api.search.percent}%)`,
+    '',
+    '📊 오늘 이용 통계',
+    `이용자: ${stats.daily.users}명 | 요청: ${stats.daily.totalCommands}회`,
+    ...(dailyCmdLines.length > 0 ? dailyCmdLines : ['  (아직 없음)']),
+    '',
+    `📊 ${stats.month} 월 누적`,
+    `이용자: ${stats.monthly.users}명 | 요청: ${stats.monthly.totalCommands}회`,
+    ...monthlyCmdLines,
+    '',
+    `⏱ 가동 시간: ${stats.uptime}`,
+  ].join('\n');
+
+  res.json(buildSimpleTextResponse(text));
+}
+
+/**
  * HELP 커맨드 - 도움말
  */
 function handleHelp(res) {
@@ -317,11 +453,13 @@ function handleHelp(res) {
     '• 경쟁 키워드 - 경쟁 강도',
     '• 시즌 키워드 - 시즌별 패턴',
     '• 연관 키워드 - 연관 키워드 25개',
+    '• 황금 키워드 - 황금키워드 발굴',
     '',
     '📝 예시:',
     '• 분석 다이어트',
     '• 트렌드 캠핑',
     '• 연관 맛집',
+    '• 황금 다이어트',
     '',
     '💡 키워드만 입력하면 자동으로 통합 분석됩니다.',
   ].join('\n');

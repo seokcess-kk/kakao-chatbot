@@ -1,4 +1,5 @@
 const cacheService = require('./cacheService');
+const statsService = require('./statsService');
 const { generateSignature } = require('../utils/signature');
 
 const NAVER_SEARCH_AD_BASE_URL = 'https://api.searchad.naver.com';
@@ -97,7 +98,7 @@ async function requestKeywordTool(keyword) {
   const timestamp = String(Date.now());
   const method = 'GET';
   const params = new URLSearchParams({
-    hintKeywords: keyword,
+    hintKeywords: trimmedKeyword,
     showDetail: '1',
   });
   const signature = generateSignature({
@@ -136,8 +137,9 @@ async function requestKeywordTool(keyword) {
       throw createAppError(GENERIC_ERROR_MESSAGE, 502, code, payload);
     }
 
-    const data = await response.json();
     clearTimeout(timeoutId);
+    statsService.trackApiCall('searchAd');
+    const data = await response.json();
     console.log(`[TIMING] 네이버 API: ${Date.now() - fetchStart}ms (keyword: ${trimmedKeyword})`);
     return data;
   } catch (error) {
@@ -169,92 +171,104 @@ async function requestKeywordTool(keyword) {
  */
 async function getKeywordVolumeWithRelated(keyword, relatedLimit = 10) {
   const normalizedKeyword = normalizeCacheKey(keyword);
-  const cacheKey = `${normalizedKeyword}_related_${relatedLimit}`;
-  const cached = cacheService.get(cacheKey);
 
-  if (cached) {
-    return cached;
+  // API 결과는 한 번만 캐싱하고, relatedLimit에 따라 slice만 다르게 적용
+  const baseCacheKey = `${normalizedKeyword}_base`;
+  let base = cacheService.get(baseCacheKey);
+
+  if (!base) {
+    const payload = await requestKeywordTool(keyword);
+    const keywordList = payload.keywordList || [];
+    const selectedKeyword = pickKeywordItem(keywordList, keyword);
+
+    if (!selectedKeyword) {
+      throw createAppError(NOT_FOUND_MESSAGE, 404, 'KEYWORD_NOT_FOUND');
+    }
+
+    const pcSearches = toNumber(selectedKeyword.monthlyPcQcCnt);
+    const mobileSearches = toNumber(selectedKeyword.monthlyMobileQcCnt);
+
+    // 연관 키워드 전체 추출 (본 키워드 제외, 검색량순 정렬)
+    const allRelated = keywordList
+      .filter((item) => normalizeCacheKey(item.relKeyword) !== normalizedKeyword)
+      .map((item) => {
+        const pc = toNumber(item.monthlyPcQcCnt);
+        const mobile = toNumber(item.monthlyMobileQcCnt);
+        const total = pc + mobile;
+        return {
+          keyword: item.relKeyword,
+          pcSearches: pc,
+          mobileSearches: mobile,
+          totalSearches: total,
+          totalSearchesText: total.toLocaleString('ko-KR'),
+          compIdx: item.compIdx || 'N/A',
+        };
+      })
+      .sort((a, b) => b.totalSearches - a.totalSearches);
+
+    const monthlyData = extractMonthlyData(selectedKeyword);
+
+    base = {
+      keyword: selectedKeyword.relKeyword || keyword,
+      pcSearches,
+      mobileSearches,
+      totalSearches: pcSearches + mobileSearches,
+      pcSearchesText: formatSearchCount(selectedKeyword.monthlyPcQcCnt),
+      mobileSearchesText: formatSearchCount(selectedKeyword.monthlyMobileQcCnt),
+      totalSearchesText: (pcSearches + mobileSearches).toLocaleString('ko-KR'),
+      compIdx: selectedKeyword.compIdx || 'N/A',
+      plAvgDepth: toNumber(selectedKeyword.plAvgDepth),
+      monthlyPcClkCnt: toNumber(selectedKeyword.monthlyPcClkCnt),
+      monthlyMobileClkCnt: toNumber(selectedKeyword.monthlyMobileClkCnt),
+      monthlyAvePcClkCnt: toNumber(selectedKeyword.monthlyAvePcClkCnt),
+      monthlyAveMobileClkCnt: toNumber(selectedKeyword.monthlyAveMobileClkCnt),
+      pcCtr: pcSearches > 0 ? (toNumber(selectedKeyword.monthlyPcClkCnt) / pcSearches * 100).toFixed(2) : '0.00',
+      mobileCtr: mobileSearches > 0 ? (toNumber(selectedKeyword.monthlyMobileClkCnt) / mobileSearches * 100).toFixed(2) : '0.00',
+      monthlyData,
+      allRelated,
+    };
+
+    cacheService.set(baseCacheKey, base, CACHE_TTL_SECONDS);
   }
 
-  const payload = await requestKeywordTool(keyword);
-  const keywordList = payload.keywordList || [];
-  const selectedKeyword = pickKeywordItem(keywordList, keyword);
-
-  if (!selectedKeyword) {
-    throw createAppError(NOT_FOUND_MESSAGE, 404, 'KEYWORD_NOT_FOUND');
-  }
-
-  const pcSearches = toNumber(selectedKeyword.monthlyPcQcCnt);
-  const mobileSearches = toNumber(selectedKeyword.monthlyMobileQcCnt);
-
-  // 연관 키워드 추출 (본 키워드 제외)
-  const relatedKeywords = keywordList
-    .filter((item) => normalizeCacheKey(item.relKeyword) !== normalizedKeyword)
-    .map((item) => ({
-      keyword: item.relKeyword,
-      pcSearches: toNumber(item.monthlyPcQcCnt),
-      mobileSearches: toNumber(item.monthlyMobileQcCnt),
-      totalSearches:
-        toNumber(item.monthlyPcQcCnt) + toNumber(item.monthlyMobileQcCnt),
-      totalSearchesText: (
-        toNumber(item.monthlyPcQcCnt) + toNumber(item.monthlyMobileQcCnt)
-      ).toLocaleString('ko-KR'),
-      compIdx: item.compIdx || 'N/A',
-    }))
-    .sort((a, b) => b.totalSearches - a.totalSearches)
-    .slice(0, relatedLimit);
-
-  // 월별 검색량 데이터 (트렌드용)
-  const monthlyData = extractMonthlyData(selectedKeyword);
-
-  const result = {
-    keyword: selectedKeyword.relKeyword || keyword,
-    pcSearches,
-    mobileSearches,
-    totalSearches: pcSearches + mobileSearches,
-    pcSearchesText: formatSearchCount(selectedKeyword.monthlyPcQcCnt),
-    mobileSearchesText: formatSearchCount(selectedKeyword.monthlyMobileQcCnt),
-    totalSearchesText: (pcSearches + mobileSearches).toLocaleString('ko-KR'),
-    // 경쟁 데이터
-    compIdx: selectedKeyword.compIdx || 'N/A',
-    plAvgDepth: toNumber(selectedKeyword.plAvgDepth),
-    // 클릭 데이터
-    monthlyPcClkCnt: toNumber(selectedKeyword.monthlyPcClkCnt),
-    monthlyMobileClkCnt: toNumber(selectedKeyword.monthlyMobileClkCnt),
-    monthlyAvePcClkCnt: toNumber(selectedKeyword.monthlyAvePcClkCnt),
-    monthlyAveMobileClkCnt: toNumber(selectedKeyword.monthlyAveMobileClkCnt),
-    // CTR 계산
-    pcCtr: pcSearches > 0 ? (toNumber(selectedKeyword.monthlyPcClkCnt) / pcSearches * 100).toFixed(2) : '0.00',
-    mobileCtr: mobileSearches > 0 ? (toNumber(selectedKeyword.monthlyMobileClkCnt) / mobileSearches * 100).toFixed(2) : '0.00',
-    // 월별 데이터 (트렌드용)
-    monthlyData,
-    // 연관 키워드
-    relatedKeywords,
+  const { allRelated, ...rest } = base;
+  return {
+    ...rest,
+    relatedKeywords: relatedLimit > 0 ? allRelated.slice(0, relatedLimit) : [],
   };
+}
 
-  cacheService.set(cacheKey, result, CACHE_TTL_SECONDS);
-
-  return result;
+/**
+ * 문자열 기반 간이 해시 (결정적 시뮬레이션용)
+ */
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
 }
 
 /**
  * 월별 검색량 데이터 추출 (최근 12개월)
  * 네이버 API가 월별 데이터를 직접 제공하지 않으므로,
- * 여기서는 시뮬레이션 데이터를 생성합니다.
+ * 여기서는 결정적 시뮬레이션 데이터를 생성합니다.
  * 실제 구현시 네이버 트렌드 API 연동 필요
  */
 function extractMonthlyData(keywordItem) {
   const now = new Date();
   const monthlyData = [];
   const baseValue = toNumber(keywordItem.monthlyPcQcCnt) + toNumber(keywordItem.monthlyMobileQcCnt);
+  const keyword = String(keywordItem.relKeyword || '');
 
   for (let i = 11; i >= 0; i--) {
     const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const year = date.getFullYear().toString().slice(2);
     const month = String(date.getMonth() + 1).padStart(2, '0');
 
-    // 시즌 변동을 시뮬레이션 (실제로는 네이버 트렌드 API 사용)
-    const seasonFactor = 0.7 + Math.random() * 0.6; // 0.7 ~ 1.3
+    // 키워드+월 기반 결정적 변동 (동일 키워드·월이면 항상 같은 값)
+    const seed = simpleHash(`${keyword}_${year}.${month}`);
+    const seasonFactor = 0.7 + (seed % 600) / 1000; // 0.7 ~ 1.3
     const value = Math.round(baseValue * seasonFactor);
 
     monthlyData.push({

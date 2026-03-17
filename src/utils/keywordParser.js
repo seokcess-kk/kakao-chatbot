@@ -6,6 +6,8 @@ const COMMAND_TYPES = {
   COMPETITION: 'COMPETITION',
   SEASON: 'SEASON',
   RELATED: 'RELATED',
+  GOLDEN: 'GOLDEN',
+  USAGE: 'USAGE',
   HELP: 'HELP',
 };
 
@@ -23,6 +25,10 @@ const COMMAND_KEYWORDS = {
   '월별': COMMAND_TYPES.SEASON,
   '연관': COMMAND_TYPES.RELATED,
   '연관키워드': COMMAND_TYPES.RELATED,
+  '황금': COMMAND_TYPES.GOLDEN,
+  '황금키워드': COMMAND_TYPES.GOLDEN,
+  '골든': COMMAND_TYPES.GOLDEN,
+  '사용량': COMMAND_TYPES.USAGE,
   '도움말': COMMAND_TYPES.HELP,
   '?': COMMAND_TYPES.HELP,
   'help': COMMAND_TYPES.HELP,
@@ -44,14 +50,14 @@ function normalizeKeyword(keyword) {
 function validateKeyword(keyword) {
   if (!keyword) {
     throw createValidationError(
-      '\uc870\ud68c\ud560 \uac80\uc0c9\uc5b4\ub97c \uc785\ub825\ud574\uc8fc\uc138\uc694. \uc608: \uac80\uc0c9\ub7c9 \ub2e4\uc774\uc5b4\ud2b8\ud55c\uc57d',
+      '조회할 검색어를 입력해주세요. 예: 검색량 다이어트한약',
       'KEYWORD_EMPTY'
     );
   }
 
   if (keyword.length < 2 || keyword.length > 50) {
     throw createValidationError(
-      '\uac80\uc0c9\uc5b4 \ud615\uc2dd\uc774 \uc62c\ubc14\ub974\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. 2\uc790 \uc774\uc0c1 50\uc790 \uc774\ud558\ub85c \uc785\ub825\ud574\uc8fc\uc138\uc694.',
+      '검색어 형식이 올바르지 않습니다. 2자 이상 50자 이하로 입력해주세요.',
       'KEYWORD_LENGTH_INVALID'
     );
   }
@@ -93,8 +99,8 @@ function parseKeywordAndCommand(body) {
   const paramKeyword = body?.action?.params?.keyword;
   const commandType = parseCommandType(utterance);
 
-  // 도움말인 경우 키워드 불필요
-  if (commandType === COMMAND_TYPES.HELP) {
+  // 도움말/사용량은 키워드 불필요
+  if (commandType === COMMAND_TYPES.HELP || commandType === COMMAND_TYPES.USAGE) {
     return { keyword: '', commandType };
   }
 
