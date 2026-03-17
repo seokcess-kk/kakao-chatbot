@@ -6,7 +6,7 @@ const {
   buildSimpleTextResponse,
 } = require('../utils/kakaoResponse');
 const { getKeywordVolumeWithRelated } = require('../services/naverKeywordService');
-const { getBlogDocCountBatch } = require('../services/naverSearchService');
+const { getDocCountsBatch, getTrendMomentumBatch } = require('../services/naverSearchService');
 const statsService = require('../services/statsService');
 
 /** 카카오 스킬서버 응답 제한 시간 (5초) 대비 안전 마진 */
@@ -317,18 +317,45 @@ async function handleRelated(keyword, res) {
 }
 
 /**
- * 황금키워드 스코어 계산
- * @param {number} monthlySearch - 월간 검색량
- * @param {number|null} totalDocs - 총 문서 수 (null이면 API 실패)
+ * 경쟁도 보정 계수
  */
-function goldenScore(monthlySearch, totalDocs) {
+function getCompetitionFactor(compIdx) {
+  switch (compIdx) {
+    case '낮음': return 1.5;
+    case '중간': return 1.0;
+    case '높음': return 0.5;
+    default: return 1.0;
+  }
+}
+
+/**
+ * 트렌드 구간 정의
+ * momentum: -1.0(급락) ~ +1.0(급상승)
+ */
+const TREND_TIERS = [
+  { min: 0.2, factor: 1.3, label: '📈급상승' },
+  { min: 0.05, factor: 1.1, label: '📈상승' },
+  { min: -0.05, factor: 1.0, label: '→안정' },
+  { min: -0.2, factor: 0.8, label: '📉하락' },
+  { min: -Infinity, factor: 0.6, label: '📉급락' },
+];
+
+function getTrendTier(momentum) {
+  if (momentum === null || momentum === undefined) return { factor: 1.0, label: '' };
+  return TREND_TIERS.find((t) => momentum >= t.min);
+}
+
+/**
+ * 황금키워드 종합 스코어 계산
+ * 스코어 = 수요공급비 × 경쟁보정 × 트렌드보정
+ */
+function goldenScore(monthlySearch, totalDocs, compIdx, momentum) {
   if (totalDocs === null || monthlySearch < 50) return null;
-  const docs = totalDocs === 0 ? 1 : totalDocs; // 문서 0 → 최고 블루오션
-  let ratio = monthlySearch / docs;
-  if (monthlySearch > 50000) ratio *= 0.3;
-  else if (monthlySearch > 10000) ratio *= 0.5;
-  else if (monthlySearch > 5000) ratio *= 0.7;
-  return Math.round(ratio * 100) / 100;
+  const docs = totalDocs === 0 ? 1 : totalDocs;
+  const supplyDemand = monthlySearch / docs;
+  const compFactor = getCompetitionFactor(compIdx);
+  const trendFactor = getTrendTier(momentum).factor;
+  return Math.round(supplyDemand * compFactor * trendFactor * 100) / 100;
 }
 
 /**
@@ -342,12 +369,12 @@ function getScoreEmoji(score) {
 }
 
 /**
- * GOLDEN 커맨드 - 황금키워드 발굴
+ * GOLDEN 커맨드 - 황금키워드 발굴 (다중 지표 스코어링)
  */
 async function handleGolden(keyword, res) {
   const data = await getKeywordVolumeWithRelated(keyword, 25);
 
-  // 사전 필터: 검색량 50 미만 제외 (5,000 초과는 스코어에서 감점 처리)
+  // 사전 필터: 검색량 50 미만 제외
   const candidates = data.relatedKeywords.filter(
     (r) => r.totalSearches >= 50
   );
@@ -362,16 +389,21 @@ async function handleGolden(keyword, res) {
     return res.json(buildSimpleTextResponse(text));
   }
 
-  // 문서 수 병렬 조회
+  // 문서 수(블로그+웹) + 트렌드 모멘텀 병렬 조회
   const keywords = candidates.map((c) => c.keyword);
-  const docCounts = await getBlogDocCountBatch(keywords);
+  const [docCounts, trends] = await Promise.all([
+    getDocCountsBatch(keywords),
+    getTrendMomentumBatch(keywords),
+  ]);
 
-  // 스코어 계산 및 정렬 (API 실패한 키워드는 제외)
+  // 종합 스코어 계산
   const scored = candidates
     .map((c) => {
-      const docs = docCounts.get(c.keyword) ?? null;
-      const score = goldenScore(c.totalSearches, docs);
-      return { ...c, docs, score };
+      const docData = docCounts.get(c.keyword);
+      const totalDocs = docData ? docData.total : null;
+      const momentum = trends.get(c.keyword) ?? null;
+      const score = goldenScore(c.totalSearches, totalDocs, c.compIdx, momentum);
+      return { ...c, totalDocs, momentum, score };
     })
     .filter((c) => c.score !== null && c.score > 0)
     .sort((a, b) => b.score - a.score)
@@ -388,13 +420,16 @@ async function handleGolden(keyword, res) {
   }
 
   const resultLines = scored.map((c, i) => {
-    return `${i + 1}. ${getScoreEmoji(c.score)} ${c.keyword}\n   검색 ${c.totalSearchesText} | 문서 ${c.docs.toLocaleString('ko-KR')} | 스코어 ${c.score}`;
+    const trendLabel = getTrendTier(c.momentum).label;
+    const compEmoji = getCompetitionEmoji(c.compIdx);
+    return `${i + 1}. ${getScoreEmoji(c.score)} ${c.keyword}  스코어 ${c.score}\n   검색 ${c.totalSearchesText} | 문서 ${c.totalDocs.toLocaleString('ko-KR')} | ${compEmoji}${c.compIdx}${trendLabel ? ' | ' + trendLabel : ''}`;
   });
 
   const text = [
     `[황금키워드] ${data.keyword}`,
     '',
-    '💰 스코어 = 검색량 ÷ 문서수 (높을수록 블루오션)',
+    '💰 종합 스코어 (높을수록 블루오션)',
+    '   수요공급비 × 경쟁보정 × 트렌드보정',
     '',
     ...resultLines,
     '',
@@ -424,6 +459,7 @@ function handleUsage(res) {
     '📡 API 사용량 (일일)',
     `검색광고 ${createBarGraph(stats.api.searchAd.used, stats.api.searchAd.limit)} ${stats.api.searchAd.used.toLocaleString('ko-KR')} / ${stats.api.searchAd.limit.toLocaleString('ko-KR')} (${stats.api.searchAd.percent}%)`,
     `검색     ${createBarGraph(stats.api.search.used, stats.api.search.limit)} ${stats.api.search.used.toLocaleString('ko-KR')} / ${stats.api.search.limit.toLocaleString('ko-KR')} (${stats.api.search.percent}%)`,
+    `트렌드   ${createBarGraph(stats.api.datalab.used, stats.api.datalab.limit)} ${stats.api.datalab.used.toLocaleString('ko-KR')} / ${stats.api.datalab.limit.toLocaleString('ko-KR')} (${stats.api.datalab.percent}%)`,
     '',
     '📊 오늘 이용 통계',
     `이용자: ${stats.daily.users}명 | 요청: ${stats.daily.totalCommands}회`,

@@ -1,5 +1,6 @@
 const NAVER_SEARCH_API_DAILY_LIMIT = 25000;
 const NAVER_SEARCHAD_API_DAILY_LIMIT = 100000;
+const NAVER_DATALAB_API_DAILY_LIMIT = 1000;
 
 class StatsService {
   constructor() {
@@ -21,7 +22,7 @@ class StatsService {
   _resetDaily() {
     this.today = this._todayKey();
     this.daily = {
-      apiCalls: { searchAd: 0, search: 0 },
+      apiCalls: { searchAd: 0, search: 0, datalab: 0 },
       commands: {},
       users: new Set(),
     };
@@ -30,7 +31,7 @@ class StatsService {
   _resetMonthly() {
     this.month = this._monthKey();
     this.monthly = {
-      apiCalls: { searchAd: 0, search: 0 },
+      apiCalls: { searchAd: 0, search: 0, datalab: 0 },
       commands: {},
       users: new Set(),
     };
@@ -89,6 +90,11 @@ class StatsService {
           used: this.daily.apiCalls.search,
           limit: NAVER_SEARCH_API_DAILY_LIMIT,
           percent: ((this.daily.apiCalls.search / NAVER_SEARCH_API_DAILY_LIMIT) * 100).toFixed(1),
+        },
+        datalab: {
+          used: this.daily.apiCalls.datalab,
+          limit: NAVER_DATALAB_API_DAILY_LIMIT,
+          percent: ((this.daily.apiCalls.datalab / NAVER_DATALAB_API_DAILY_LIMIT) * 100).toFixed(1),
         },
       },
       daily: {
