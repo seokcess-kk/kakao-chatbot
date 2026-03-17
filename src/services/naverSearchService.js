@@ -5,7 +5,7 @@ const NAVER_SEARCH_BLOG_URL = 'https://openapi.naver.com/v1/search/blog.json';
 const NAVER_SEARCH_WEB_URL = 'https://openapi.naver.com/v1/search/webkr.json';
 const NAVER_DATALAB_URL = 'https://openapi.naver.com/v1/datalab/search';
 const SEARCH_FETCH_TIMEOUT_MS = 2000;
-const DATALAB_FETCH_TIMEOUT_MS = 2500;
+const DATALAB_FETCH_TIMEOUT_MS = 3000;
 const CACHE_TTL_SECONDS = 600;
 
 /**
