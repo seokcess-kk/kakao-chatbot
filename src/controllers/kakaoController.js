@@ -346,16 +346,27 @@ function getTrendTier(momentum) {
 }
 
 /**
+ * 검색량 구간별 콘텐츠 경쟁 감점 계수
+ */
+function getVolumeFactor(monthlySearch) {
+  if (monthlySearch > 50000) return 0.3;
+  if (monthlySearch > 10000) return 0.5;
+  if (monthlySearch > 5000) return 0.7;
+  return 1.0;
+}
+
+/**
  * 황금키워드 종합 스코어 계산
- * 스코어 = 수요공급비 × 경쟁보정 × 트렌드보정
+ * 스코어 = 수요공급비 × 검색량감점 × 경쟁보정 × 트렌드보정
  */
 function goldenScore(monthlySearch, totalDocs, compIdx, momentum) {
   if (totalDocs === null || monthlySearch < 50) return null;
   const docs = totalDocs === 0 ? 1 : totalDocs;
   const supplyDemand = monthlySearch / docs;
+  const volumeFactor = getVolumeFactor(monthlySearch);
   const compFactor = getCompetitionFactor(compIdx);
   const trendFactor = getTrendTier(momentum).factor;
-  return Math.round(supplyDemand * compFactor * trendFactor * 100) / 100;
+  return Math.round(supplyDemand * volumeFactor * compFactor * trendFactor * 100) / 100;
 }
 
 /**
@@ -420,20 +431,19 @@ async function handleGolden(keyword, res) {
   }
 
   const resultLines = scored.map((c, i) => {
-    const trendLabel = getTrendTier(c.momentum).label;
-    const compEmoji = getCompetitionEmoji(c.compIdx);
-    return `${i + 1}. ${getScoreEmoji(c.score)} ${c.keyword}  스코어 ${c.score}\n   검색 ${c.totalSearchesText} | 문서 ${c.totalDocs.toLocaleString('ko-KR')} | ${compEmoji}${c.compIdx}${trendLabel ? ' | ' + trendLabel : ''}`;
+    const trend = getTrendTier(c.momentum).label;
+    const comp = getCompetitionEmoji(c.compIdx);
+    const num = String(i + 1).padStart(2, ' ');
+    return `${num}. ${c.keyword} [${c.score}]\n    ${c.totalSearchesText}회 ${comp}${c.compIdx} ${trend}`;
   });
 
   const text = [
     `[황금키워드] ${data.keyword}`,
-    '',
-    '💰 종합 스코어 (높을수록 블루오션)',
-    '   수요공급비 × 경쟁보정 × 트렌드보정',
+    `스코어가 높을수록 블루오션`,
     '',
     ...resultLines,
     '',
-    `분석 대상: ${candidates.length}개 키워드 (검색량 50 이상)`,
+    `${candidates.length}개 분석 | 검색량 50 이상`,
   ].join('\n');
 
   res.json(buildSimpleTextResponse(text));
