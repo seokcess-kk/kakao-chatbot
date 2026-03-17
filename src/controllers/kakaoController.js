@@ -265,7 +265,7 @@ async function handleSeason(keyword, res) {
       indicator = ' 💤비수기';
       lowMonths.push(m.period.split('.')[1]);
     }
-    return `${m.period} ${bar}${indicator}`;
+    return `${m.period} ${bar} ${m.valueText}${indicator}`;
   });
 
   const text = [

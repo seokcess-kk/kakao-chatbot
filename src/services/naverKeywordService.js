@@ -190,7 +190,6 @@ async function getKeywordVolumeWithRelated(keyword, relatedLimit = 10) {
   // 연관 키워드 추출 (본 키워드 제외)
   const relatedKeywords = keywordList
     .filter((item) => normalizeCacheKey(item.relKeyword) !== normalizedKeyword)
-    .slice(0, relatedLimit)
     .map((item) => ({
       keyword: item.relKeyword,
       pcSearches: toNumber(item.monthlyPcQcCnt),
@@ -201,7 +200,9 @@ async function getKeywordVolumeWithRelated(keyword, relatedLimit = 10) {
         toNumber(item.monthlyPcQcCnt) + toNumber(item.monthlyMobileQcCnt)
       ).toLocaleString('ko-KR'),
       compIdx: item.compIdx || 'N/A',
-    }));
+    }))
+    .sort((a, b) => b.totalSearches - a.totalSearches)
+    .slice(0, relatedLimit);
 
   // 월별 검색량 데이터 (트렌드용)
   const monthlyData = extractMonthlyData(selectedKeyword);
