@@ -346,26 +346,24 @@ function getTrendTier(momentum) {
 }
 
 /**
- * 황금키워드 원점수 계산 (로그 스케일)
- * log(검색량) / log(문서수) → 1.0에 가까울수록 블루오션
- */
-function goldenRawScore(monthlySearch, totalDocs) {
-  if (totalDocs === null || monthlySearch < 50) return null;
-  const docs = totalDocs === 0 ? 1 : totalDocs;
-  if (docs <= 1) return 1.0;
-  return Math.log10(monthlySearch) / Math.log10(docs);
-}
-
-/**
  * 황금키워드 종합 스코어 (0~100점)
- * 원점수(로그비) × 경쟁보정 × 트렌드보정 → 100점 만점 정규화
+ * 문서수 있음: log(검색량)/log(문서수) × 경쟁보정 × 트렌드보정 × 100
+ * 문서수 없음: 경쟁보정 × 트렌드보정 × 50 (기본 50점 기반)
  */
 function goldenScore(monthlySearch, totalDocs, compIdx, momentum) {
-  const raw = goldenRawScore(monthlySearch, totalDocs);
-  if (raw === null) return null;
+  if (monthlySearch < 50) return null;
   const compFactor = getCompetitionFactor(compIdx);
   const trendFactor = getTrendTier(momentum).factor;
-  // raw는 보통 0.5~0.9 범위 → 100점 스케일로 변환
+
+  let raw;
+  if (totalDocs !== null) {
+    const docs = totalDocs === 0 ? 1 : totalDocs;
+    raw = docs <= 1 ? 1.0 : Math.log10(monthlySearch) / Math.log10(docs);
+  } else {
+    // 문서수 미확인 시 기본 0.5 (50점 기반)
+    raw = 0.5;
+  }
+
   const score = raw * compFactor * trendFactor * 100;
   return Math.round(Math.min(score, 100));
 }
@@ -460,7 +458,8 @@ async function handleGolden(keyword, res) {
     const comp = getCompetitionEmoji(c.compIdx);
     const grade = getScoreGrade(c.score);
     const num = String(i + 1).padStart(2, ' ');
-    return `${num}. ${c.keyword} ${c.score}점${grade ? ' ' + grade : ''}\n    ${c.totalSearchesText}회 ${comp}${c.compIdx} ${trend}`;
+    const docLabel = c.totalDocs !== null ? '' : ' *';
+    return `${num}. ${c.keyword} ${c.score}점${grade ? ' ' + grade : ''}${docLabel}\n    ${c.totalSearchesText}회 ${comp}${c.compIdx} ${trend}`;
   }
 
   const lines = [];
@@ -480,7 +479,7 @@ async function handleGolden(keyword, res) {
   }
 
   lines.push('');
-  lines.push(`${candidates.length}개 분석 | 검색량 50 이상`);
+  lines.push(`${candidates.length}개 분석 | * 문서수 미확인`);
 
   res.json(buildSimpleTextResponse(lines.join('\n')));
 }
