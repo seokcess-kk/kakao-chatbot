@@ -487,8 +487,8 @@ async function handleGolden(keyword, res) {
 /**
  * USAGE 커맨드 - API 사용량 및 통계 (도움말에 미표시)
  */
-function handleUsage(res) {
-  const stats = statsService.getStats();
+async function handleUsage(res) {
+  const stats = await statsService.getStats();
 
   const dailyCmdLines = Object.entries(stats.daily.commandBreakdown)
     .sort((a, b) => b[1] - a[1])
@@ -512,9 +512,7 @@ function handleUsage(res) {
     '',
     `📊 ${stats.month} 월 누적`,
     `이용자: ${stats.monthly.users}명 | 요청: ${stats.monthly.totalCommands}회`,
-    ...monthlyCmdLines,
-    '',
-    `⏱ 가동 시간: ${stats.uptime}`,
+    ...(monthlyCmdLines.length > 0 ? monthlyCmdLines : ['  (아직 없음)']),
   ].join('\n');
 
   res.json(buildSimpleTextResponse(text));
